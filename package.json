@@ -1,0 +1,24 @@
+{
+  "name": "bomba-arena",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @bomba/client",
+    "build": "npm run build -w @bomba/client",
+    "preview": "npm run preview -w @bomba/client",
+    "test": "npm run test -w @bomba/shared",
+    "typecheck": "tsc -p packages/shared && tsc -p packages/client && tsc -p packages/server",
+    "host": "npm run build && npm run start -w @bomba/server",
+    "online": "npm run build && npm run start:tunnel -w @bomba/server",
+    "rede": "npm run build && npm run start:rede -w @bomba/server",
+    "direto": "npm run build && npm run start:direto -w @bomba/server"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@bomba/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "start:tunnel": "tsx src/main.ts --tunnel",
+    "start:rede": "tsx src/main.ts --rede",
+    "start:direto": "tsx src/main.ts --direto"
+  },
+  "dependencies": {
+    "@bomba/shared": "*",
+    "cloudflared": "^0.7.3",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.15"
+  }
+}

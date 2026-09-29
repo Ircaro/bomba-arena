@@ -10,6 +10,8 @@ import {
   PLAYER_COLOR_COUNT,
   TICK_RATE,
   WINS_TO_FINISH,
+  botInput,
+  createBotMemory,
   createGame,
   createMatch,
   isRoomCode,
@@ -17,6 +19,7 @@ import {
   randomSeed,
   startNextRound,
   stepMatch,
+  type BotMemory,
   type GameEvent,
   type GameState,
   type LobbyPlayer,
@@ -40,6 +43,11 @@ type Face = { portrait: Portrait; expression: Expression };
 const LOCAL_PLAYERS: PlayerSetup[] = [
   { id: 'p1', name: 'Jogador 1' },
   { id: 'p2', name: 'Jogador 2' },
+];
+const BOT_ID = 'bot';
+const BOT_PLAYERS: PlayerSetup[] = [
+  { id: 'p1', name: 'Você' },
+  { id: BOT_ID, name: 'Bot' },
 ];
 const STEP_MS = 1000 / TICK_RATE;
 const OVERLAY_GRACE_MS = 600;
@@ -75,7 +83,9 @@ const musicButton = byId<HTMLButtonElement>('toggle-music');
 
 const localKeyboard = new Keyboard(BINDINGS);
 const soloKeyboard = new Keyboard([SOLO_BINDING]);
-const localMatch = createMatch(LOCAL_PLAYERS, randomSeed());
+let localMatch = createMatch(LOCAL_PLAYERS, randomSeed());
+let vsBot = false;
+let botMemory: BotMemory = createBotMemory(Math.random);
 const renderer = new Renderer(byId<HTMLCanvasElement>('board'), localMatch.game.width, localMatch.game.height);
 const hud = new Hud(byId('hud'), byId('round'));
 const tracker = new EventTracker();
@@ -129,7 +139,7 @@ function nameOf(id: string | null): string {
 }
 
 function setScreen(next: Screen, now = performance.now()): void {
-  document.body.dataset.mode = mode;
+  document.body.dataset.mode = mode === 'local' && vsBot ? 'bot' : mode;
   screen = next;
   screenSince = now;
   renderOverlay();
@@ -398,7 +408,8 @@ function renderOverlay(): void {
         'Enter para jogar no mesmo teclado',
         LOCAL_PLAYERS.map((_, color) => ({ color, expression: 'normal' })),
       );
-      addAction('Mesmo teclado', () => startLocal(performance.now()), true);
+      addAction('Contra o bot', () => newLocalMatch(true, performance.now()), true);
+      addAction('Mesmo teclado', () => newLocalMatch(false, performance.now()), false);
       addAction('Jogar online', () => goOnline(null), false);
       break;
     case 'paused':
@@ -444,6 +455,7 @@ function renderRoundOver(): void {
   }
   if (mode === 'local') {
     addAction(match.champion ? 'Jogar de novo' : 'Próxima rodada', () => advanceLocal(performance.now()), true);
+    addAction('Menu', () => setScreen('intro'), false);
     return;
   }
   const list = document.createElement('ul');
@@ -578,10 +590,18 @@ function announceResult(events: readonly GameEvent[]): void {
   }
 }
 
+function newLocalMatch(withBot: boolean, now: number): void {
+  vsBot = withBot;
+  localMatch = createMatch(withBot ? BOT_PLAYERS : LOCAL_PLAYERS, randomSeed());
+  botMemory = createBotMemory(Math.random);
+  startLocal(now);
+}
+
 function startLocal(now: number): void {
   mode = 'local';
   previous.clear();
   localKeyboard.clearPendingBombs();
+  soloKeyboard.clearPendingBombs();
   renderer.beginEntrance(now);
   sound.setMusic(false);
   sound.play('round');
@@ -624,7 +644,7 @@ function handleLocalKey(event: KeyboardEvent, now: number): void {
     return;
   }
   if (!CONFIRM_KEYS.has(event.code) || now - screenSince < OVERLAY_GRACE_MS) return;
-  if (screen === 'intro') startLocal(now);
+  if (screen === 'intro') newLocalMatch(false, now);
   else if (screen === 'roundOver') advanceLocal(now);
 }
 
@@ -660,6 +680,7 @@ sound.onChange(syncAudioButtons);
 syncAudioButtons();
 
 function readLocalInputs(): Record<string, PlayerInput> {
+  if (vsBot) return { p1: soloKeyboard.read(0), [BOT_ID]: botInput(localMatch.game, BOT_ID, botMemory, Math.random) };
   return Object.fromEntries(LOCAL_PLAYERS.map((player, slot) => [player.id, localKeyboard.read(slot)]));
 }
 
@@ -781,7 +802,9 @@ function frame(now: number): void {
 if (import.meta.env.DEV) {
   Object.assign(window, {
     __bomba: {
-      match: localMatch,
+      get match() {
+        return localMatch;
+      },
       renderer,
       sound,
       get online() {

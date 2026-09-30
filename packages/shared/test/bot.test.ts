@@ -6,6 +6,7 @@ import {
   createGame,
   nextRandom,
   step,
+  type BotDifficulty,
   type GameState,
   type PlayerInput,
 } from '../src';
@@ -97,10 +98,89 @@ describe('comportamento do bot', () => {
       const random = seeded(seed);
       const memory = createBotMemory(random);
       const idle: PlayerInput = { dir: null, bomb: false };
-      for (let i = 0; i < 60 * 120 && state.phase !== 'ended'; i++) {
+      for (let i = 0; i < 60 * 180 && state.phase !== 'ended'; i++) {
         step(state, { bot: botInput(state, 'bot', memory, random), alvo: idle });
       }
       expect(state.players[1].alive).toBe(false);
+      expect(state.winner).toBe('bot');
+    }
+  });
+
+  it('sobrevive sozinho em qualquer dificuldade', () => {
+    const levels: BotDifficulty[] = ['facil', 'medio', 'dificil'];
+    for (const level of levels) {
+      for (const seed of [11, 12]) {
+        const state = createGame([{ id: 'bot', name: 'Bot' }], seed);
+        const random = seeded(seed);
+        const memory = createBotMemory(random, level);
+        for (let i = 0; i < 60 * 45; i++) step(state, { bot: botInput(state, 'bot', memory, random) });
+        expect(state.players[0].alive).toBe(true);
+      }
+    }
+  });
+
+  it('no fácil, demora a reagir à bomba de outro jogador', () => {
+    const reactions: Record<string, number> = {};
+    for (const level of ['facil', 'dificil'] as BotDifficulty[]) {
+      const state = emptyArena(1);
+      const random = seeded(3);
+      const memory = createBotMemory(random, level);
+      state.bombs.push({ id: 9, owner: 'p2', x: 2, y: 1, ticksLeft: 150, range: 2, passable: [] });
+      let tick = 0;
+      for (; tick < 150 && state.players[0].x === 1.5 && state.players[0].y === 1.5; tick++) {
+        step(state, { p1: botInput(state, 'p1', memory, random) });
+      }
+      reactions[level] = tick;
+    }
+    expect(reactions.dificil).toBeLessThanOrEqual(15);
+    expect(reactions.facil).toBeGreaterThanOrEqual(50);
+  });
+
+  it('no fácil, nunca tem mais de uma bomba no campo', () => {
+    const state = createGame([{ id: 'bot', name: 'Bot' }], 8);
+    state.players[0].maxBombs = 4;
+    const random = seeded(8);
+    const memory = createBotMemory(random, 'facil');
+    let most = 0;
+    for (let i = 0; i < 60 * 60; i++) {
+      step(state, { bot: botInput(state, 'bot', memory, random) });
+      most = Math.max(most, state.bombs.length);
+    }
+    expect(most).toBe(1);
+  });
+
+  it('no fácil, poupa um adversário parado', () => {
+    for (const seed of [5, 6]) {
+      const state = createGame(
+        [
+          { id: 'bot', name: 'Bot' },
+          { id: 'alvo', name: 'Alvo' },
+        ],
+        seed,
+      );
+      const random = seeded(seed);
+      const memory = createBotMemory(random, 'facil');
+      for (let i = 0; i < 60 * 90 && state.phase !== 'ended'; i++) {
+        step(state, { bot: botInput(state, 'bot', memory, random), alvo: { dir: null, bomb: false } });
+      }
+      expect(state.players[1].alive).toBe(true);
+    }
+  });
+
+  it('no difícil, derrota um adversário parado', () => {
+    for (const seed of [5, 6]) {
+      const state = createGame(
+        [
+          { id: 'bot', name: 'Bot' },
+          { id: 'alvo', name: 'Alvo' },
+        ],
+        seed,
+      );
+      const random = seeded(seed);
+      const memory = createBotMemory(random, 'dificil');
+      for (let i = 0; i < 60 * 150 && state.phase !== 'ended'; i++) {
+        step(state, { bot: botInput(state, 'bot', memory, random), alvo: { dir: null, bomb: false } });
+      }
       expect(state.winner).toBe('bot');
     }
   });

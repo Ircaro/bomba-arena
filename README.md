@@ -1,13 +1,14 @@
 # Bomba Arena
 
-Jogo de bombas em arena, no estilo dos clássicos do gênero, que roda no navegador. Dá para jogar sozinho contra um bot, em duas pessoas no mesmo teclado ou online com até 4 jogadores, cada um no seu computador.
+Jogo de bombas em arena, no estilo dos clássicos do gênero, que roda no navegador. Dá para jogar sozinho contra até 3 bots, em duas pessoas no mesmo teclado ou online com até 4 jogadores, cada um no seu computador.
 
 ## Destaques
 
 - **Jogabilidade:** arena 15x13 com pilares fixos e caixas destrutíveis, bombas com explosão em cruz e reação em cadeia, power-ups (bomba extra, alcance e velocidade), rodadas com empate e partida decidida por quem vencer 3 rodadas.
 - **Gráficos em Canvas 2D:** tudo desenhado em código, sem imagens. Terreno com textura e sombras, caixas e pilares em pseudo-3D, personagens animados (caminhada, piscar, comemoração, nocaute com fantasminha), chamas com brilho, partículas, marcas de queimado e tremida de tela. Nítido em qualquer zoom ou DPI.
 - **Som sintetizado:** efeitos e música gerados na hora pela Web Audio API, sem arquivos de áudio. Os níveis foram medidos para nada distorcer, e o som sai do lado da tela onde o evento acontece.
-- **Bot:** adversário que prevê explosões com as mesmas regras do jogo, foge das bombas, abre caminho pelas caixas, pega power-ups e caça o jogador.
+- **Bot:** adversário que prevê explosões com as mesmas regras do jogo, foge das bombas, abre caminho pelas caixas, pega power-ups e caça o jogador. Tem três dificuldades (Fácil, Médio e Difícil, que tenta encurralar) e dá para colocar de 1 a 3 bots na arena.
+- **Tela cheia e Full HD:** em telas largas o placar vai para uma coluna ao lado da arena, que cresce até ocupar a altura da tela.
 - **Online:** servidor autoritativo em Node com WebSocket. Salas por link com código de 6 caracteres, escolha de nome e cor, sistema de "pronto" com contagem de 5 segundos, ping de cada jogador na tela e espectador para quem entra no meio de uma rodada.
 - **Acessibilidade:** respeita a preferência de reduzir movimento (desliga a tremida e as animações da página).
 
@@ -62,7 +63,7 @@ O ping de cada jogador aparece no HUD e na sala. Como o servidor roda no seu PC,
 
 ## Controles
 
-**Contra o bot:** WASD ou setas para mover, Espaço ou Enter para soltar bomba, Esc pausa.
+**Contra o bot:** escolha a dificuldade e a quantidade de bots no menu. WASD ou setas para mover, Espaço ou Enter para soltar bomba, Esc pausa (com opções de continuar, reiniciar ou voltar ao menu).
 
 **Mesmo teclado:**
 
@@ -75,7 +76,7 @@ Esc pausa.
 
 **Online:** cada um joga no próprio teclado, com WASD ou setas para mover e Espaço ou Enter para soltar bomba. Enter ou Espaço também marcam "pronto" na sala.
 
-Em qualquer modo, M liga e desliga o som. O cabeçalho tem botões para o som e para a música.
+Em qualquer modo, M liga e desliga o som e F alterna a tela cheia. O cabeçalho tem botões para o som e para a música.
 
 ## Segurança do modo online
 
@@ -91,4 +92,4 @@ Em qualquer modo, M liga e desliga o som. O cabeçalho tem botões para o som e 
 npm test
 ```
 
-Cobrem as regras do jogo (movimento, colisão, bombas, reação em cadeia, power-ups, fim de rodada e placar), o bot (previsão de explosão igual à do motor, fuga de bombas, sobrevivência e vitória contra adversário parado), o detector de eventos e o protocolo online (validação de mensagens, código de sala, limpeza de nomes e sincronização de estado entre servidor e cliente).
+Cobrem as regras do jogo (movimento, colisão, bombas, reação em cadeia, power-ups, fim de rodada e placar), o bot (previsão de explosão igual à do motor, fuga de bombas, sobrevivência em todas as dificuldades e vitória contra adversário parado), o detector de eventos e o protocolo online (validação de mensagens, código de sala, limpeza de nomes e sincronização de estado entre servidor e cliente).

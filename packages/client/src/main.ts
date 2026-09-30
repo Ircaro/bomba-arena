@@ -16,9 +16,11 @@ import {
   createMatch,
   isRoomCode,
   normalizeRoomCode,
+  ROOM_CODE_LENGTH,
   randomSeed,
   startNextRound,
   stepMatch,
+  type BotDifficulty,
   type BotMemory,
   type GameEvent,
   type GameState,
@@ -39,15 +41,21 @@ import { paletteFor } from './theme';
 type Mode = 'local' | 'online';
 type Screen = 'intro' | 'countdown' | 'playing' | 'paused' | 'roundOver' | 'connecting' | 'lobby' | 'failure';
 type Face = { portrait: Portrait; expression: Expression };
+type MenuView = 'home' | 'bot' | 'online';
+interface BotSettings {
+  difficulty: BotDifficulty;
+  count: number;
+}
 
 const LOCAL_PLAYERS: PlayerSetup[] = [
   { id: 'p1', name: 'Jogador 1' },
   { id: 'p2', name: 'Jogador 2' },
 ];
-const BOT_ID = 'bot';
-const BOT_PLAYERS: PlayerSetup[] = [
-  { id: 'p1', name: 'Você' },
-  { id: BOT_ID, name: 'Bot' },
+const BOT_SETTINGS_KEY = 'bomba-arena:bot';
+const DIFFICULTIES: { id: BotDifficulty; label: string; description: string }[] = [
+  { id: 'facil', label: 'Fácil', description: 'Só quebra caixas, não vai atrás de você e demora a perceber suas bombas.' },
+  { id: 'medio', label: 'Médio', description: 'Vai atrás de você, mas às vezes reage tarde.' },
+  { id: 'dificil', label: 'Difícil', description: 'Agressivo: caça você e tenta te encurralar.' },
 ];
 const STEP_MS = 1000 / TICK_RATE;
 const OVERLAY_GRACE_MS = 600;
@@ -79,13 +87,14 @@ const overlayCountdown = byId('overlay-countdown');
 const overlayActions = byId('overlay-actions');
 const overlayHint = byId('overlay-hint');
 const soundButton = byId<HTMLButtonElement>('toggle-sound');
+const fullscreenButton = byId<HTMLButtonElement>('toggle-fullscreen');
 const musicButton = byId<HTMLButtonElement>('toggle-music');
 
 const localKeyboard = new Keyboard(BINDINGS);
 const soloKeyboard = new Keyboard([SOLO_BINDING]);
 let localMatch = createMatch(LOCAL_PLAYERS, randomSeed());
 let vsBot = false;
-let botMemory: BotMemory = createBotMemory(Math.random);
+let botMemories = new Map<string, BotMemory>();
 const renderer = new Renderer(byId<HTMLCanvasElement>('board'), localMatch.game.width, localMatch.game.height);
 const hud = new Hud(byId('hud'), byId('round'));
 const tracker = new EventTracker();
@@ -93,6 +102,7 @@ const sound = new SoundEngine();
 const previous = new Map<string, Position>();
 const overlayFaces: Face[] = [];
 const swatchFaces: Face[] = [];
+const menuFaces: Face[] = [];
 
 let mode: Mode = 'local';
 let online: OnlineClient | null = null;
@@ -105,6 +115,8 @@ let failure = { title: '', text: '' };
 let lobbyRoom: string | null = null;
 let accumulator = 0;
 let countdownSecond: number | null = null;
+let menuView: MenuView = 'home';
+let botSettings = loadBotSettings();
 
 function isFormTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLButtonElement || target instanceof HTMLInputElement;
@@ -140,6 +152,8 @@ function nameOf(id: string | null): string {
 
 function setScreen(next: Screen, now = performance.now()): void {
   document.body.dataset.mode = mode === 'local' && vsBot ? 'bot' : mode;
+  document.body.dataset.screen = next;
+  if (next !== 'intro') menuFaces.length = 0;
   screen = next;
   screenSince = now;
   renderOverlay();
@@ -402,18 +416,10 @@ function renderOverlay(): void {
   }
   switch (screen) {
     case 'intro':
-      setOverlay(
-        'Bomba Arena',
-        `Exploda caixas, pegue power-ups e derrube o adversário. Vence a partida quem ganhar ${WINS_TO_FINISH} rodadas.`,
-        'Enter para jogar no mesmo teclado',
-        LOCAL_PLAYERS.map((_, color) => ({ color, expression: 'normal' })),
-      );
-      addAction('Contra o bot', () => newLocalMatch(true, performance.now()), true);
-      addAction('Mesmo teclado', () => newLocalMatch(false, performance.now()), false);
-      addAction('Jogar online', () => goOnline(null), false);
+      renderMenu();
       break;
     case 'paused':
-      setOverlay('Pausado', 'A partida está congelada.', 'Esc para continuar');
+      renderPause();
       break;
     case 'roundOver':
       renderRoundOver();
@@ -426,11 +432,266 @@ function renderOverlay(): void {
       break;
     case 'failure':
       setOverlay(failure.title, failure.text, '');
-      addAction('Voltar ao início', () => (location.href = location.pathname), true);
+      addAction('Voltar ao menu', () => leaveOnline(), true);
+      focusOverlay();
       break;
     default:
       break;
   }
+}
+
+function openMenu(view: MenuView): void {
+  menuView = view;
+  setScreen('intro');
+}
+
+function loadBotSettings(): BotSettings {
+  try {
+    const stored = JSON.parse(localStorage.getItem(BOT_SETTINGS_KEY) ?? '{}') as Partial<BotSettings>;
+    const difficulty = DIFFICULTIES.some((item) => item.id === stored.difficulty) ? (stored.difficulty as BotDifficulty) : 'medio';
+    const count = stored.count === 2 || stored.count === 3 ? stored.count : 1;
+    return { difficulty, count };
+  } catch {
+    return { difficulty: 'medio', count: 1 };
+  }
+}
+
+function saveBotSettings(): void {
+  try {
+    localStorage.setItem(BOT_SETTINGS_KEY, JSON.stringify(botSettings));
+  } catch {
+    return;
+  }
+}
+
+function focusOverlay(selector = '.button.primary, .mode-card'): void {
+  const target = overlay.querySelector<HTMLElement>(selector);
+  target?.focus({ preventScroll: true });
+}
+
+function overlayFocusables(): HTMLElement[] {
+  return [...overlay.querySelectorAll<HTMLElement>('button:not(:disabled), input')].filter((element) => element.offsetParent !== null);
+}
+
+function moveFocus(delta: number): void {
+  const items = overlayFocusables();
+  if (items.length === 0) return;
+  const current = items.indexOf(document.activeElement as HTMLElement);
+  const next = current < 0 ? 0 : (current + delta + items.length) % items.length;
+  items[next].focus({ preventScroll: true });
+}
+
+function modeCard(shortcut: string, title: string, description: string, colors: number[], action: () => void): HTMLElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'mode-card';
+  button.dataset.shortcut = shortcut;
+  const faces = document.createElement('span');
+  faces.className = 'mode-faces';
+  for (const color of colors) {
+    const portrait = new Portrait(color, 46);
+    menuFaces.push({ portrait, expression: 'normal' });
+    faces.append(portrait.element);
+  }
+  const key = document.createElement('kbd');
+  key.textContent = shortcut;
+  button.append(faces, badge(title, 'mode-title'), badge(description, 'mode-text'), key);
+  button.addEventListener('click', () => {
+    sound.unlock();
+    sound.play('confirm');
+    action();
+  });
+  return button;
+}
+
+function optionGroup<T extends string | number>(
+  label: string,
+  options: { value: T; label: string }[],
+  current: T,
+  onChange: (value: T) => void,
+): HTMLElement {
+  const group = document.createElement('div');
+  group.className = 'option-group';
+  const title = badge(label, 'option-label');
+  const row = document.createElement('div');
+  row.className = 'segmented';
+  row.setAttribute('role', 'radiogroup');
+  row.setAttribute('aria-label', label);
+  const buttons = options.map((option) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'segment';
+    button.textContent = option.label;
+    button.setAttribute('role', 'radio');
+    button.setAttribute('aria-checked', String(option.value === current));
+    button.addEventListener('click', () => {
+      sound.unlock();
+      sound.play('confirm');
+      for (const other of buttons) other.setAttribute('aria-checked', String(other === button));
+      onChange(option.value);
+    });
+    return button;
+  });
+  row.append(...buttons);
+  group.append(title, row);
+  return group;
+}
+
+function renderMenu(): void {
+  menuFaces.length = 0;
+  if (menuView === 'bot') {
+    renderBotMenu();
+    return;
+  }
+  if (menuView === 'online') {
+    renderOnlineMenu();
+    return;
+  }
+  setOverlay('Bomba Arena', 'Exploda caixas, pegue power-ups e derrube quem estiver na arena.', 'Escolha com o mouse, ou com as setas e Enter');
+  const grid = document.createElement('div');
+  grid.className = 'mode-grid';
+  grid.append(
+    modeCard('1', 'Contra o bot', 'Você contra até 3 bots, do fácil ao difícil.', [0, 1], () => openMenu('bot')),
+    modeCard('2', 'Mesmo teclado', 'Duas pessoas no mesmo computador.', [2, 3], () => newLocalMatch(false, performance.now())),
+    modeCard('3', 'Online', 'Até 4 pessoas, cada uma no seu computador.', [0, 1, 2, 3], () => openMenu('online')),
+  );
+  overlayExtra.replaceChildren(grid);
+  focusOverlay('.mode-card');
+}
+
+function renderBotMenu(): void {
+  setOverlay('Contra o bot', 'Escolha a dificuldade e quantos bots vão para a arena.', 'Esc para voltar');
+  const description = badge('', 'option-description');
+  const describe = () => {
+    description.textContent = DIFFICULTIES.find((item) => item.id === botSettings.difficulty)?.description ?? '';
+  };
+  describe();
+  const options = document.createElement('div');
+  options.className = 'menu-options';
+  options.append(
+    optionGroup(
+      'Dificuldade',
+      DIFFICULTIES.map((item) => ({ value: item.id, label: item.label })),
+      botSettings.difficulty,
+      (value) => {
+        botSettings.difficulty = value;
+        saveBotSettings();
+        describe();
+      },
+    ),
+    description,
+    optionGroup(
+      'Quantidade de bots',
+      [1, 2, 3].map((value) => ({ value, label: String(value) })),
+      botSettings.count,
+      (value) => {
+        botSettings.count = value;
+        saveBotSettings();
+      },
+    ),
+  );
+  overlayExtra.replaceChildren(options);
+  addAction('Jogar', () => newLocalMatch(true, performance.now()), true);
+  addAction('Voltar', () => openMenu('home'), false);
+  focusOverlay();
+}
+
+function renderOnlineMenu(): void {
+  setOverlay('Online', 'Crie uma sala e mande o link, ou entre com o código que você recebeu.', 'Esc para voltar');
+  const wrapper = document.createElement('div');
+  wrapper.className = 'online-menu';
+  const create = document.createElement('button');
+  create.type = 'button';
+  create.className = 'button primary wide';
+  create.textContent = 'Criar sala';
+  create.addEventListener('click', () => {
+    sound.unlock();
+    goOnline(null);
+  });
+  const divider = badge('ou entre com um código', 'divider');
+  const row = document.createElement('div');
+  row.className = 'join-row';
+  const input = document.createElement('input');
+  input.id = 'join-code';
+  input.maxLength = ROOM_CODE_LENGTH;
+  input.placeholder = 'K7Q2XM';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.setAttribute('aria-label', 'Código da sala');
+  const join = document.createElement('button');
+  join.type = 'button';
+  join.className = 'button secondary';
+  join.textContent = 'Entrar';
+  const error = document.createElement('p');
+  error.className = 'join-error';
+  error.setAttribute('aria-live', 'polite');
+  const submit = () => {
+    const code = normalizeRoomCode(input.value);
+    if (!isRoomCode(code)) {
+      error.textContent = `O código tem ${ROOM_CODE_LENGTH} letras ou números, como K7Q2XM.`;
+      input.focus();
+      return;
+    }
+    sound.unlock();
+    goOnline(code);
+  };
+  input.addEventListener('input', () => {
+    input.value = input.value.toUpperCase();
+    error.textContent = '';
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+  });
+  join.addEventListener('click', submit);
+  row.append(input, join);
+  wrapper.append(create, divider, row, error);
+  overlayExtra.replaceChildren(wrapper);
+  addAction('Voltar', () => openMenu('home'), false);
+  create.focus({ preventScroll: true });
+}
+
+function renderPause(): void {
+  setOverlay('Pausado', 'A partida está congelada.', 'Esc para continuar');
+  addAction('Continuar', () => resumeLocal(performance.now()), true);
+  addAction('Reiniciar partida', () => newLocalMatch(vsBot, performance.now()), false);
+  addAction('Menu', () => {
+    sound.setMusic(false);
+    openMenu('home');
+  }, false);
+  focusOverlay();
+}
+
+function pauseLocal(now: number): void {
+  if (mode !== 'local' || screen !== 'playing') return;
+  sound.play('pause');
+  sound.setMusic(false);
+  setScreen('paused', now);
+}
+
+function resumeLocal(now: number): void {
+  if (screen !== 'paused') return;
+  localKeyboard.clearPendingBombs();
+  soloKeyboard.clearPendingBombs();
+  sound.play('confirm');
+  sound.setMusic(localMatch.game.phase === 'playing');
+  setScreen('playing', now);
+}
+
+function leaveOnline(): void {
+  online?.close();
+  online = null;
+  mode = 'local';
+  preview = null;
+  goAt = null;
+  banner = null;
+  history.replaceState(null, '', location.pathname);
+  sound.setMusic(false);
+  openMenu('home');
+}
+
+function toggleFullscreen(): void {
+  if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+  else void document.documentElement.requestFullscreen?.().catch(() => undefined);
 }
 
 function renderRoundOver(): void {
@@ -455,7 +716,8 @@ function renderRoundOver(): void {
   }
   if (mode === 'local') {
     addAction(match.champion ? 'Jogar de novo' : 'Próxima rodada', () => advanceLocal(performance.now()), true);
-    addAction('Menu', () => setScreen('intro'), false);
+    addAction('Menu', () => openMenu('home'), false);
+    focusOverlay();
     return;
   }
   const list = document.createElement('ul');
@@ -463,6 +725,7 @@ function renderRoundOver(): void {
   list.append(...(online?.players ?? []).map((player) => playerRow(player, false)));
   overlayExtra.replaceChildren(list);
   addReadyAction();
+  addAction('Sair da sala', () => leaveOnline(), false);
 }
 
 function renderLobby(): void {
@@ -479,6 +742,7 @@ function renderLobby(): void {
   }
   refreshLobby();
   addReadyAction();
+  addAction('Sair da sala', () => leaveOnline(), false);
 }
 
 function updateStartCountdown(now: number): void {
@@ -590,10 +854,18 @@ function announceResult(events: readonly GameEvent[]): void {
   }
 }
 
+function botPlayers(): PlayerSetup[] {
+  const count = botSettings.count;
+  const bots = Array.from({ length: count }, (_, i) => ({ id: `bot${i + 1}`, name: count === 1 ? 'Bot' : `Bot ${i + 1}` }));
+  return [{ id: 'p1', name: 'Você' }, ...bots];
+}
+
 function newLocalMatch(withBot: boolean, now: number): void {
   vsBot = withBot;
-  localMatch = createMatch(withBot ? BOT_PLAYERS : LOCAL_PLAYERS, randomSeed());
-  botMemory = createBotMemory(Math.random);
+  localMatch = createMatch(withBot ? botPlayers() : LOCAL_PLAYERS, randomSeed());
+  botMemories = new Map(
+    localMatch.players.filter((player) => player.id !== 'p1' && withBot).map((player) => [player.id, createBotMemory(Math.random, botSettings.difficulty)]),
+  );
   startLocal(now);
 }
 
@@ -629,23 +901,27 @@ function go(now: number): void {
   setScreen('playing', now);
 }
 
+function handleMenuKey(event: KeyboardEvent): boolean {
+  if (screen !== 'intro') return false;
+  if (event.code === 'Escape' && menuView !== 'home') {
+    openMenu('home');
+    return true;
+  }
+  if (menuView === 'home' && /^Digit[123]$/.test(event.code)) {
+    overlay.querySelector<HTMLButtonElement>(`.mode-card[data-shortcut="${event.code.slice(5)}"]`)?.click();
+    return true;
+  }
+  return false;
+}
+
 function handleLocalKey(event: KeyboardEvent, now: number): void {
   if (event.code === 'Escape') {
-    if (screen === 'playing') {
-      sound.play('pause');
-      sound.setMusic(false);
-      setScreen('paused', now);
-    } else if (screen === 'paused') {
-      localKeyboard.clearPendingBombs();
-      sound.play('confirm');
-      sound.setMusic(localMatch.game.phase === 'playing');
-      setScreen('playing', now);
-    }
+    if (screen === 'playing') pauseLocal(now);
+    else if (screen === 'paused') resumeLocal(now);
     return;
   }
   if (!CONFIRM_KEYS.has(event.code) || now - screenSince < OVERLAY_GRACE_MS) return;
-  if (screen === 'intro') newLocalMatch(false, now);
-  else if (screen === 'roundOver') advanceLocal(now);
+  if (screen === 'roundOver') advanceLocal(now);
 }
 
 function handleOnlineKey(event: KeyboardEvent, now: number): void {
@@ -656,10 +932,23 @@ function handleOnlineKey(event: KeyboardEvent, now: number): void {
 window.addEventListener('keydown', (event) => {
   if (event.repeat) return;
   sound.unlock();
-  if (isFormTarget(event.target) && (CONFIRM_KEYS.has(event.code) || event.code === 'KeyM')) return;
+  const typing = event.target instanceof HTMLInputElement;
+  if (isFormTarget(event.target) && (CONFIRM_KEYS.has(event.code) || event.code === 'KeyM' || event.code === 'KeyF')) return;
+  if (typing && event.code !== 'Escape') return;
   const now = performance.now();
   if (event.code === 'KeyM') {
     sound.toggleSound();
+    return;
+  }
+  if (event.code === 'KeyF') {
+    toggleFullscreen();
+    return;
+  }
+  if (handleMenuKey(event)) return;
+  const menuOpen = !overlay.hidden && screen !== 'countdown' && screen !== 'playing';
+  if (menuOpen && ['ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight'].includes(event.code)) {
+    event.preventDefault();
+    moveFocus(event.code === 'ArrowUp' || event.code === 'ArrowLeft' ? -1 : 1);
     return;
   }
   if (mode === 'local') handleLocalKey(event, now);
@@ -669,9 +958,19 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('pointerdown', () => sound.unlock());
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden || mode !== 'local' || screen !== 'playing') return;
-  sound.setMusic(false);
-  setScreen('paused');
+  if (document.hidden) pauseLocal(performance.now());
+});
+
+document.addEventListener('fullscreenchange', () => {
+  fullscreenButton.setAttribute('aria-pressed', String(!!document.fullscreenElement));
+  if (!document.fullscreenElement) pauseLocal(performance.now());
+});
+
+fullscreenButton.hidden = !document.fullscreenEnabled;
+fullscreenButton.addEventListener('click', () => {
+  sound.unlock();
+  toggleFullscreen();
+  fullscreenButton.blur();
 });
 
 bindAudioButton(soundButton, () => sound.toggleSound());
@@ -680,7 +979,11 @@ sound.onChange(syncAudioButtons);
 syncAudioButtons();
 
 function readLocalInputs(): Record<string, PlayerInput> {
-  if (vsBot) return { p1: soloKeyboard.read(0), [BOT_ID]: botInput(localMatch.game, BOT_ID, botMemory, Math.random) };
+  if (vsBot) {
+    const inputs: Record<string, PlayerInput> = { p1: soloKeyboard.read(0) };
+    for (const [id, memory] of botMemories) inputs[id] = botInput(localMatch.game, id, memory, Math.random);
+    return inputs;
+  }
   return Object.fromEntries(LOCAL_PLAYERS.map((player, slot) => [player.id, localKeyboard.read(slot)]));
 }
 
@@ -758,7 +1061,12 @@ function hudView(game: GameState): HudView {
   return {
     chip: {
       strong: `Rodada ${match?.round ?? 1}`,
-      rest: mode === 'online' && online?.room ? `sala ${online.room} · primeiro a ${winsToFinish}` : `primeiro a ${winsToFinish} vitórias`,
+      rest:
+        mode === 'online' && online?.room
+          ? `sala ${online.room} · primeiro a ${winsToFinish}`
+          : vsBot
+            ? `bot ${DIFFICULTIES.find((item) => item.id === botSettings.difficulty)?.label.toLowerCase()} · primeiro a ${winsToFinish}`
+            : `primeiro a ${winsToFinish} vitórias`,
     },
     winsToFinish,
     players: game.players.map((player) => ({
@@ -796,6 +1104,7 @@ function frame(now: number): void {
   if (!overlay.hidden) {
     for (const face of overlayFaces) face.portrait.draw(now, face.expression);
     for (const face of swatchFaces) face.portrait.draw(now, face.expression);
+    for (const face of menuFaces) face.portrait.draw(now, face.expression);
   }
 }
 
@@ -824,6 +1133,6 @@ if (requestedRoom !== null) {
     setScreen('failure');
   }
 } else {
-  renderOverlay();
+  setScreen('intro');
 }
 requestAnimationFrame(frame);

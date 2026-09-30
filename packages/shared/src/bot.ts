@@ -19,12 +19,13 @@ interface BotProfile {
   bombCap: number;
   spares: boolean;
   hesitate: number;
+  margin: boolean;
 }
 
 const PROFILES: Record<BotDifficulty, BotProfile> = {
-  facil: { aggression: [0, 0], thinkEvery: 10, powerUpReach: 0, cooldown: [1.6, 2.6], trapChance: 0, reaction: [1.4, 1.8], hunts: false, foeBias: 0, bombCap: 1, spares: true, hesitate: 0.35 },
-  medio: { aggression: [0.04, 0.08], thinkEvery: 0, powerUpReach: 6, cooldown: [0.45, 0.85], trapChance: 0.05, reaction: [0.3, 0.45], hunts: true, foeBias: 2, bombCap: 2, spares: false, hesitate: 0 },
-  dificil: { aggression: [0.2, 0.3], thinkEvery: 0, powerUpReach: 10, cooldown: [0.25, 0.5], trapChance: 0.5, reaction: [0.08, 0.15], hunts: true, foeBias: 2, bombCap: 3, spares: false, hesitate: 0 },
+  facil: { aggression: [0, 0], thinkEvery: 10, powerUpReach: 0, cooldown: [1.6, 2.6], trapChance: 0, reaction: [1.4, 1.8], hunts: false, foeBias: 0, bombCap: 1, spares: true, hesitate: 0.35, margin: true },
+  medio: { aggression: [0.04, 0.08], thinkEvery: 0, powerUpReach: 6, cooldown: [0.45, 0.85], trapChance: 0.05, reaction: [0.3, 0.45], hunts: true, foeBias: 2, bombCap: 2, spares: false, hesitate: 0, margin: true },
+  dificil: { aggression: [0.2, 0.3], thinkEvery: 0, powerUpReach: 10, cooldown: [0.25, 0.5], trapChance: 0.5, reaction: [0.08, 0.15], hunts: true, foeBias: 2, bombCap: 3, spares: false, hesitate: 0, margin: false },
 };
 
 export interface BotMemory {
@@ -42,6 +43,8 @@ export interface BotMemory {
   bombCap: number;
   spares: boolean;
   hesitate: number;
+  margin: boolean;
+  escapeTarget: number | null;
 }
 
 export function createBotMemory(random: () => number, difficulty: BotDifficulty = 'medio'): BotMemory {
@@ -62,6 +65,8 @@ export function createBotMemory(random: () => number, difficulty: BotDifficulty 
     bombCap: profile.bombCap,
     spares: profile.spares,
     hesitate: profile.hesitate,
+    margin: profile.margin,
+    escapeTarget: null,
   };
 }
 
@@ -127,6 +132,16 @@ function dangerMap(state: GameState, bombs: readonly Bomb[]): Danger {
 
 function threatened(danger: Danger, cell: number): boolean {
   return danger.explodeAt[cell] !== Infinity || danger.burningUntil[cell] > 0;
+}
+
+function nearDanger(state: GameState, danger: Danger, cell: number): boolean {
+  const x = cell % state.width;
+  const y = Math.floor(cell / state.width);
+  return Object.values(DIRECTIONS).some(({ dx, dy }) => {
+    const nx = x + dx;
+    const ny = y + dy;
+    return nx >= 0 && ny >= 0 && nx < state.width && ny < state.height && threatened(danger, index(state, nx, ny));
+  });
 }
 
 const SAFETY_TICKS = 3;
@@ -291,6 +306,26 @@ function blockable(state: GameState, bot: Player, bombs: readonly Bomb[], route:
   });
 }
 
+function comfortableEscape(state: GameState, bot: Player, bombs: readonly Bomb[], danger: Danger, memory: BotMemory, random: () => number): Search | null {
+  const ticksPerCell = TICK_RATE / bot.speed;
+  const passable = (cell: number, distance: number) =>
+    !deadlyDuring(danger, cell, (distance - 0.5) * ticksPerCell, (distance + 0.7) * ticksPerCell);
+  const target = memory.escapeTarget;
+  if (target !== null && !threatened(danger, target) && !nearDanger(state, danger, target)) {
+    const kept = search(state, bot, bombs, (cell) => cell === target, passable);
+    if (kept) return kept;
+  }
+  const comfortable = (cell: number, steps: number) => steps > 0 && !threatened(danger, cell) && !nearDanger(state, danger, cell);
+  let options = ORDER.map((dir) => search(state, bot, bombs, comfortable, passable, dir)).filter((route): route is Search => route !== null);
+  if (crowded(state, bot)) options = options.filter((route) => !blockable(state, bot, bombs, route));
+  if (options.length === 0) return null;
+  const shortest = Math.min(...options.map((route) => route.steps));
+  const close = options.filter((route) => route.steps <= shortest + 2);
+  const chosen = close[Math.floor(random() * close.length)];
+  memory.escapeTarget = chosen.cell;
+  return chosen;
+}
+
 function bestEscape(state: GameState, bot: Player, bombs: readonly Bomb[], danger: Danger): Search | null {
   if (!crowded(state, bot)) return escape(state, bot, bombs, danger);
   const routes = routesByDirection(state, bot, bombs, danger);
@@ -326,39 +361,43 @@ export function botInput(state: GameState, id: string, memory: BotMemory, random
       ? state.bombs.filter((bomb) => bomb.owner === bot.id || BOMB_FUSE_TICKS - bomb.ticksLeft >= memory.reaction)
       : state.bombs;
   const danger = dangerMap(state, noticed);
+  const ownBombs = state.bombs.filter((bomb) => bomb.owner === bot.id);
+  const ownDanger = memory.margin && ownBombs.length > 0 ? dangerMap(state, ownBombs) : null;
   const [x, y] = playerCell(bot);
   const here = index(state, x, y);
 
   if (threatened(danger, here)) {
-    const route = bestEscape(state, bot, state.bombs, danger);
+    const route = (memory.margin ? comfortableEscape(state, bot, state.bombs, danger, memory, random) : null) ?? bestEscape(state, bot, state.bombs, danger);
     if (route?.firstStep) return { dir: route.firstStep, bomb: false };
     return IDLE;
   }
 
+  memory.escapeTarget = null;
   if (memory.cooldown > 0) memory.cooldown--;
   if (state.phase !== 'playing') return IDLE;
 
   if (memory.thinkIn > 0) {
     memory.thinkIn--;
-    return keepGoing(state, bot, danger, memory.lastDir);
+    return keepGoing(state, bot, danger, memory.lastDir, ownDanger);
   }
-  const decision = memory.hesitate > 0 && random() < memory.hesitate ? IDLE : decide(state, bot, memory, random, danger);
+  const decision = memory.hesitate > 0 && random() < memory.hesitate ? IDLE : decide(state, bot, memory, random, danger, ownDanger);
   memory.lastDir = decision.dir;
   memory.thinkIn = memory.thinkEvery;
   return decision;
 }
 
-function keepGoing(state: GameState, bot: Player, danger: Danger, dir: Direction | null): PlayerInput {
+function keepGoing(state: GameState, bot: Player, danger: Danger, dir: Direction | null, ownDanger: Danger | null): PlayerInput {
   if (!dir) return IDLE;
   const [x, y] = playerCell(bot);
   const { dx, dy } = DIRECTIONS[dir];
   const nx = x + dx;
   const ny = y + dy;
-  if (blocked(state, state.bombs, nx, ny) || threatened(danger, index(state, nx, ny))) return IDLE;
+  const next = index(state, nx, ny);
+  if (blocked(state, state.bombs, nx, ny) || threatened(danger, next) || (ownDanger !== null && nearDanger(state, ownDanger, next))) return IDLE;
   return { dir, bomb: false };
 }
 
-function decide(state: GameState, bot: Player, memory: BotMemory, random: () => number, danger: Danger): PlayerInput {
+function decide(state: GameState, bot: Player, memory: BotMemory, random: () => number, danger: Danger, ownDanger: Danger | null): PlayerInput {
   const [x, y] = playerCell(bot);
   const canBomb = state.bombs.filter((bomb) => bomb.owner === bot.id).length < Math.min(bot.maxBombs, memory.bombCap) && memory.cooldown === 0;
   const bomb = (): PlayerInput => {
@@ -369,7 +408,7 @@ function decide(state: GameState, bot: Player, memory: BotMemory, random: () => 
   if (canBomb && memory.trapChance > 0 && random() < memory.trapChance && trapsEnemy(state, bot)) return bomb();
   if (canBomb && !memory.spares && bombValue(state, bot, x, y) >= 4 && random() < memory.aggression * 3 && safeToBomb(state, bot)) return bomb();
 
-  const avoid = (cell: number) => !threatened(danger, cell);
+  const avoid = (cell: number) => !threatened(danger, cell) && !(ownDanger !== null && nearDanger(state, ownDanger, cell));
   const powerUps = new Set(state.powerUps.map((item) => index(state, item.x, item.y)));
   const toPowerUp = search(state, bot, state.bombs, (cell, steps) => steps > 0 && powerUps.has(cell), avoid);
   if (toPowerUp?.firstStep && toPowerUp.steps <= memory.powerUpReach) return { dir: toPowerUp.firstStep, bomb: false };

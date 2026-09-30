@@ -20,6 +20,7 @@ const JOIN_FAILURE_WINDOW_MS = 60_000;
 const MAX_JOIN_FAILURES = 12;
 const MAX_CONNECTIONS = 200;
 const MESSAGES_PER_SECOND = 120;
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const root = fileURLToPath(new URL('../../client/dist/', import.meta.url));
 
 if (!existsSync(path.join(root, 'index.html'))) {
@@ -42,10 +43,18 @@ function isLoopback(address: string | undefined): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
 
+function header(request: http.IncomingMessage, name: string): string | undefined {
+  const value = request.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
 function clientKey(request: http.IncomingMessage): string {
   const remote = request.socket.remoteAddress;
-  const forwarded = request.headers['cf-connecting-ip'];
-  const viaTunnel = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  if (TRUST_PROXY) {
+    const behindProxy = header(request, 'x-forwarded-for')?.split(',')[0]?.trim();
+    if (behindProxy) return behindProxy;
+  }
+  const viaTunnel = header(request, 'cf-connecting-ip');
   if (viaTunnel && isLoopback(remote)) return viaTunnel;
   return remote ?? 'desconhecido';
 }

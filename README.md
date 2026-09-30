@@ -59,6 +59,14 @@ $env:PORT=8081; npm run direto      # PowerShell
 
 O servidor só funciona enquanto o processo estiver rodando e o computador ligado.
 
+### Hospedar no Render (sem depender do seu PC)
+
+O repositório tem um `render.yaml` pronto. No [Render](https://render.com), crie um **Blueprint** apontando para este repositório e confirme. O Render instala, faz o build e publica a página e o servidor juntos num link fixo com HTTPS, e publica de novo a cada push na `main`.
+
+No plano gratuito, o serviço dorme depois de 15 minutos sem acesso (o primeiro acesso depois disso leva cerca de um minuto) e roda nos EUA, então o ping a partir do Brasil fica em torno de 120 a 150 ms.
+
+A variável `TRUST_PROXY=1` faz o servidor usar o IP informado pelo proxy da plataforma (`X-Forwarded-For`) para limitar tentativas por jogador. Use só quando o servidor estiver atrás de um proxy.
+
 O ping de cada jogador aparece no HUD e na sala. Como o servidor roda no seu PC, o ping de quem entrou pelo link é praticamente o atraso entre vocês. Pela Cloudflare, os pacotes passam pelo ponto de São Paulo; pelo modo direto, vão de um computador ao outro.
 
 ## Controles
@@ -83,7 +91,7 @@ Em qualquer modo, M liga e desliga o som e F alterna a tela cheia. O cabeçalho 
 - O servidor entrega só os arquivos do build do jogo, com proteção contra acesso a arquivos fora dessa pasta.
 - Toda mensagem dos jogadores é validada, com limite de tamanho e de frequência. Nomes passam por limpeza de caracteres de controle e têm até 16 caracteres.
 - Tentativas de entrar em sala inexistente são limitadas por endereço, o que impede chutar códigos.
-- No modo padrão e no modo túnel, o servidor escuta só no próprio computador.
+- No modo padrão e no modo túnel, o servidor escuta só no próprio computador. No Render, escuta em todas as interfaces, atrás do proxy da plataforma.
 - O link da sala funciona como link de reunião: quem tiver o link entra. Mande só para quem vai jogar.
 
 ## Testes

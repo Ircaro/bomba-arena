@@ -1,4 +1,5 @@
-import { WebSocket } from 'ws';
+import { TICK_RATE } from './constants';
+import { createMatch, startNextRound, stepMatch } from './match';
 import {
   COUNTDOWN_MS,
   MATCH_START_DELAY_MS,
@@ -6,28 +7,29 @@ import {
   NEXT_ROUND_DELAY_MS,
   PLAYER_COLOR_COUNT,
   SNAPSHOT_EVERY_TICKS,
-  TICK_RATE,
   buildSnapshot,
-  createMatch,
   matchInfo,
-  randomSeed,
   sanitizeName,
-  startNextRound,
-  stepMatch,
   type ClientMessage,
-  type Direction,
-  type MatchState,
-  type PlayerInput,
-  type PlayerSetup,
+  type PeerRoute,
   type RoomStatus,
   type ServerMessage,
-  type Tile,
-} from '@bomba/shared';
+} from './protocol';
+import { randomSeed } from './rng';
+import type { Direction, MatchState, PlayerInput, PlayerSetup, Tile } from './types';
 
 const STEP_MS = 1000 / TICK_RATE;
 const LOOP_INTERVAL_MS = 4;
 const STALE_MS = 10_000;
 const MAX_BUFFERED_BYTES = 512 * 1024;
+
+export interface Peer {
+  readonly open: boolean;
+  readonly buffered: number;
+  readonly route?: PeerRoute;
+  send(data: string): void;
+  close(): void;
+}
 
 export interface InviteInfo {
   url: string | null;
@@ -39,7 +41,7 @@ export interface Member {
   name: string;
   color: number;
   ready: boolean;
-  socket: WebSocket;
+  peer: Peer;
   dir: Direction | null;
   bombQueued: boolean;
   ping: number | null;
@@ -52,9 +54,9 @@ export class Room {
   private hostId: string | null = null;
   private match: MatchState | null = null;
   private sentTiles: Tile[] = [];
-  private loop: NodeJS.Timeout | null = null;
-  private countdown: NodeJS.Timeout | null = null;
-  private pendingStart: NodeJS.Timeout | null = null;
+  private loop: ReturnType<typeof setInterval> | null = null;
+  private countdown: ReturnType<typeof setTimeout> | null = null;
+  private pendingStart: ReturnType<typeof setTimeout> | null = null;
   private startAt: number | null = null;
   private lastTime = 0;
   private accumulator = 0;
@@ -71,7 +73,7 @@ export class Room {
     return this.members.length;
   }
 
-  join(socket: WebSocket): Member | null {
+  join(peer: Peer): Member | null {
     if (this.members.length >= MAX_ROOM_PLAYERS) return null;
     this.joined++;
     const used = new Set(this.members.map((member) => member.color));
@@ -82,7 +84,7 @@ export class Room {
       name: `Jogador ${this.joined}`,
       color,
       ready: false,
-      socket,
+      peer,
       dir: null,
       bombQueued: false,
       ping: null,
@@ -146,7 +148,7 @@ export class Room {
   heartbeat(now: number): void {
     for (const member of [...this.members]) {
       if (now - member.lastSeen > STALE_MS) {
-        member.socket.terminate();
+        member.peer.close();
         continue;
       }
       this.send(member, { type: 'ping', sent: now });
@@ -168,6 +170,7 @@ export class Room {
         color: member.color,
         ready: member.ready,
         ping: member.ping === null ? null : Math.round(member.ping),
+        ...(member.peer.route ? { route: member.peer.route } : {}),
       })),
       inMatch: this.match && this.status !== 'lobby' ? this.match.players.map((player) => player.id) : [],
       publicUrl: invite.url,
@@ -309,16 +312,16 @@ export class Room {
   }
 
   private send(member: Member, message: ServerMessage): void {
-    if (member.socket.readyState === WebSocket.OPEN) member.socket.send(JSON.stringify(message));
+    if (member.peer.open) member.peer.send(JSON.stringify(message));
   }
 
   private broadcast(message: ServerMessage): void {
     const payload = JSON.stringify(message);
     const droppable = message.type === 'snapshot';
     for (const member of this.members) {
-      if (member.socket.readyState !== WebSocket.OPEN) continue;
-      if (droppable && member.socket.bufferedAmount > MAX_BUFFERED_BYTES) continue;
-      member.socket.send(payload);
+      if (!member.peer.open) continue;
+      if (droppable && member.peer.buffered > MAX_BUFFERED_BYTES) continue;
+      member.peer.send(payload);
     }
   }
 }

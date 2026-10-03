@@ -1281,3 +1281,13 @@ body[data-screen='intro'] .round-chip {
 body[data-screen='intro'] .controls {
   visibility: hidden;
 }
+
+.badge.route.direto {
+  color: #10240b;
+  background: #7ee07a;
+}
+
+.badge.route.relay {
+  color: #2a1b00;
+  background: #ffd45e;
+}

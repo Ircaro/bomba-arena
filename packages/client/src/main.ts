@@ -33,6 +33,8 @@ import type { Expression } from './character';
 import { Hud, createPingPill, updatePingPill, type HudView } from './hud';
 import { BINDINGS, Keyboard, SOLO_BINDING } from './input';
 import { OnlineClient, type FailureCode, type Position } from './online';
+import { hostRoom, joinRoom, serverRoom } from './p2p';
+import { startPresence } from './presence';
 import { Portrait } from './portrait';
 import { Renderer, type Banner } from './renderer';
 import { SoundEngine } from './sound';
@@ -234,6 +236,8 @@ function playerRow(player: LobbyPlayer, withPing: boolean): HTMLElement {
   row.append(dot, name);
   if (player.id === online?.you) row.append(badge('você'));
   if (player.id === online?.host) row.append(badge('anfitrião'));
+  if (player.route === 'direto') row.append(badge('direto', 'badge route direto'));
+  if (player.route === 'servidor') row.append(badge('via servidor', 'badge route relay'));
   const right = document.createElement('span');
   right.className = 'row-end';
   right.append(readyPill(player.ready));
@@ -344,9 +348,11 @@ function refreshLobby(): void {
   const note = document.getElementById('invite-note');
   if (note) {
     const localOnly = !client.publicUrl && ['localhost', '127.0.0.1'].includes(location.hostname);
-    note.textContent = localOnly
+    const hosting = client.me?.route === 'local' ? 'Mantenha esta aba aberta e visível: a partida roda no seu navegador.' : '';
+    const hint = localOnly
       ? 'Este link só abre neste computador. Para convidar alguém, inicie com "npm run rede" (Radmin VPN ou mesmo Wi-Fi) ou "npm run online".'
       : client.inviteHint ?? '';
+    note.textContent = [hint, hosting].filter(Boolean).join(' ');
   }
   const nameInput = document.getElementById('profile-name');
   if (nameInput instanceof HTMLInputElement && document.activeElement !== nameInput) {
@@ -765,19 +771,15 @@ function updateStartCountdown(now: number): void {
   overlayCountdown.hidden = false;
 }
 
-function serverUrl(): string {
-  const configured = import.meta.env.VITE_SERVER_URL;
-  if (typeof configured === 'string' && configured) return configured;
-  return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
-}
-
 function goOnline(room: string | null): void {
   online?.close();
   mode = 'online';
   preview = null;
   goAt = null;
   banner = null;
-  const client = new OnlineClient(serverUrl(), room, {
+  const serverMode = new URLSearchParams(location.search).get('modo') === 'servidor';
+  const connection = room ? joinRoom(room) : serverMode ? serverRoom() : hostRoom();
+  const client = new OnlineClient(connection, room, {
     lobby: () => onLobby(client),
     round: (countdownMs) => onRound(client, countdownMs),
     failure: (code, message) => onFailure(client, code, message),
@@ -1136,3 +1138,5 @@ if (requestedRoom !== null) {
   setScreen('intro');
 }
 requestAnimationFrame(frame);
+
+startPresence();

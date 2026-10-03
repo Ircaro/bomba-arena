@@ -11,6 +11,8 @@ import {
   type ServerMessage,
   type Snapshot,
 } from '@bomba/shared';
+import type { Channel } from './net';
+import type { Connection } from './p2p';
 
 const TICK_MS = 1000 / TICK_RATE;
 const RENDER_DELAY_TICKS = 4;
@@ -41,33 +43,39 @@ export class OnlineClient {
   startsAt: number | null = null;
   match: MatchState | null = null;
   pings: Record<string, number> = {};
-  private readonly socket: WebSocket;
+  private channel: Channel | null = null;
   private queue: Snapshot[] = [];
   private offset: number | null = null;
   private appliedTick = 0;
   private sentDir: Direction | null | undefined = undefined;
-  private opened = false;
   private finished = false;
 
   constructor(
-    url: string,
+    private readonly connection: Connection,
     room: string | null,
     private readonly events: OnlineEvents,
   ) {
-    this.socket = new WebSocket(url);
-    this.socket.addEventListener('open', () => {
-      this.opened = true;
-      this.send({ type: 'join', room });
-    });
-    this.socket.addEventListener('message', (event) => {
-      if (typeof event.data === 'string') this.receive(event.data);
-    });
-    this.socket.addEventListener('close', () => {
-      if (this.finished) return;
-      this.finished = true;
-      if (this.opened) this.events.failure('lost', 'A conexão com a sala caiu.');
-      else this.events.failure('unreachable', 'Não consegui falar com o servidor do jogo.');
-    });
+    connection.channel.then(
+      (channel) => {
+        if (this.finished) {
+          channel.close();
+          return;
+        }
+        this.channel = channel;
+        channel.onMessage((data) => this.receive(data));
+        channel.onClose((reason) => {
+          if (this.finished) return;
+          this.finished = true;
+          this.events.failure('lost', reason ?? 'A conexão com a sala caiu.');
+        });
+        channel.onOpen(() => this.send({ type: 'join', room }));
+      },
+      (error: unknown) => {
+        if (this.finished) return;
+        this.finished = true;
+        this.events.failure('unreachable', error instanceof Error ? error.message : 'Não consegui falar com o servidor do jogo.');
+      },
+    );
   }
 
   get joined(): boolean {
@@ -105,7 +113,8 @@ export class OnlineClient {
 
   close(): void {
     this.finished = true;
-    this.socket.close();
+    this.channel?.close();
+    this.connection.close();
   }
 
   frame(now: number): Map<string, Position> {
@@ -203,6 +212,6 @@ export class OnlineClient {
   }
 
   private send(message: ClientMessage): void {
-    if (this.socket.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
+    if (this.channel?.open) this.channel.send(JSON.stringify(message));
   }
 }

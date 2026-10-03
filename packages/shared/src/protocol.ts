@@ -12,12 +12,15 @@ export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 export type RoomStatus = 'lobby' | 'countdown' | 'playing' | 'roundOver';
 
+export type PeerRoute = 'direto' | 'servidor' | 'local';
+
 export interface LobbyPlayer {
   id: string;
   name: string;
   color: number;
   ready: boolean;
   ping: number | null;
+  route?: PeerRoute;
 }
 
 export interface PlayerFrame {

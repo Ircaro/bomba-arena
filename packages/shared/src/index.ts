@@ -5,4 +5,6 @@ export * from './match';
 export * from './events';
 export * from './protocol';
 export * from './bot';
+export * from './room';
+export * from './signal';
 export { nextRandom, randomSeed } from './rng';

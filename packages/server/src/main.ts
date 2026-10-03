@@ -4,8 +4,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { ROOM_CODE_ALPHABET, ROOM_CODE_LENGTH, parseClientMessage, type ErrorCode } from '@bomba/shared';
-import { Room, type InviteInfo, type Member } from './room';
+import {
+  MAX_ROOM_PLAYERS,
+  ROOM_CODE_ALPHABET,
+  ROOM_CODE_LENGTH,
+  Room,
+  parseClientMessage,
+  parseSignalMessage,
+  type ErrorCode,
+  type InviteInfo,
+  type Member,
+  type Peer,
+  type SignalServerMessage,
+} from '@bomba/shared';
 import { serveStatic } from './static';
 import { openTunnel, type PublicTunnel } from './tunnel';
 
@@ -20,8 +31,9 @@ const JOIN_FAILURE_WINDOW_MS = 60_000;
 const MAX_JOIN_FAILURES = 12;
 const MAX_CONNECTIONS = 200;
 const MESSAGES_PER_SECOND = 120;
+const HOST_MESSAGES_PER_SECOND = 600;
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
-const root = fileURLToPath(new URL('../../client/dist/', import.meta.url));
+const root = process.env.DIST_DIR ? path.resolve(process.env.DIST_DIR) + path.sep : fileURLToPath(new URL('../../client/dist/', import.meta.url));
 
 if (!existsSync(path.join(root, 'index.html'))) {
   console.error('Não encontrei o build do jogo. Rode "npm run build" antes de iniciar o servidor.');
@@ -29,6 +41,15 @@ if (!existsSync(path.join(root, 'index.html'))) {
 }
 
 const rooms = new Map<string, Room>();
+
+interface HostedRoom {
+  code: string;
+  host: WebSocket;
+  guests: Map<string, WebSocket>;
+  joined: number;
+}
+
+const hosted = new Map<string, HostedRoom>();
 const joinFailures = new Map<string, number[]>();
 let tunnel: PublicTunnel | null = null;
 
@@ -120,9 +141,22 @@ function createRoomCode(): string {
     for (let i = 0; i < ROOM_CODE_LENGTH; i++) {
       code += ROOM_CODE_ALPHABET[Math.floor(Math.random() * ROOM_CODE_ALPHABET.length)];
     }
-    if (!rooms.has(code)) return code;
+    if (!rooms.has(code) && !hosted.has(code)) return code;
   }
   throw new Error('Sem códigos de sala disponíveis');
+}
+
+function wsPeer(socket: WebSocket): Peer {
+  return {
+    get open() {
+      return socket.readyState === socket.OPEN;
+    },
+    get buffered() {
+      return socket.bufferedAmount;
+    },
+    send: (data) => socket.send(data),
+    close: () => socket.terminate(),
+  };
 }
 
 function reject(socket: WebSocket, code: ErrorCode, message: string): void {
@@ -130,10 +164,62 @@ function reject(socket: WebSocket, code: ErrorCode, message: string): void {
   socket.close(1008, code);
 }
 
+const PRESENCE_WINDOW_MS = 150_000;
+const PRESENCE_MAX = 5000;
+const presence = new Map<string, number>();
+
+function isInternal(request: http.IncomingMessage): boolean {
+  return isLoopback(request.socket.remoteAddress) && !request.headers['cf-connecting-ip'] && !request.headers['x-forwarded-for'];
+}
+
+function onlineNow(): number {
+  const time = Date.now();
+  for (const [key, at] of presence) if (time - at > PRESENCE_WINDOW_MS) presence.delete(key);
+  return presence.size;
+}
+
+function readPresence(request: http.IncomingMessage, response: http.ServerResponse, leaving: boolean): void {
+  let body = '';
+  request.setEncoding('utf8');
+  request.on('data', (chunk: string) => {
+    body += chunk;
+    if (body.length > 100) request.destroy();
+  });
+  request.on('end', () => {
+    const id = body.trim();
+    if (/^[A-Za-z0-9-]{8,64}$/.test(id)) {
+      if (leaving) presence.delete(id);
+      else if (presence.has(id) || presence.size < PRESENCE_MAX) presence.set(id, Date.now());
+    }
+    response.writeHead(204, { 'Cache-Control': 'no-store' });
+    response.end();
+  });
+}
+
 const server = http.createServer((request, response) => {
+  const pathname = (request.url ?? '/').split('?')[0];
+  if (request.method === 'POST' && (pathname === '/api/presenca' || pathname === '/api/presenca/sair')) {
+    readPresence(request, response, pathname.endsWith('/sair'));
+    return;
+  }
+  if (pathname === '/api/online') {
+    if (!isInternal(request)) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    const players = [...rooms.values()].reduce((sum, room) => sum + room.size, 0) + [...hosted.values()].reduce((sum, room) => sum + 1 + room.guests.size, 0);
+    response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    response.end(JSON.stringify({ conectados: sockets.clients.size, salas: rooms.size + hosted.size, jogadores: players, online: onlineNow() }));
+    return;
+  }
   void serveStatic(root, request, response);
 });
-const sockets = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 });
+const sockets = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
+
+function signal(socket: WebSocket, message: SignalServerMessage): void {
+  if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(message));
+}
 
 sockets.on('connection', (socket, request) => {
   const key = clientKey(request);
@@ -143,8 +229,23 @@ sockets.on('connection', (socket, request) => {
   }
   let room: Room | null = null;
   let member: Member | null = null;
+  let hosting: HostedRoom | null = null;
+  let guestOf: { room: HostedRoom; peer: string } | null = null;
   let windowStart = performance.now();
   let received = 0;
+
+  function joinHosted(target: HostedRoom): void {
+    if (target.guests.size >= MAX_ROOM_PLAYERS - 1) {
+      reject(socket, 'room-full', 'A sala está cheia (máximo de 4 jogadores).');
+      return;
+    }
+    target.joined++;
+    const peer = `p${target.joined}`;
+    target.guests.set(peer, socket);
+    guestOf = { room: target, peer };
+    signal(socket, { type: 'p2p', peer });
+    signal(target.host, { type: 'peer', peer });
+  }
 
   socket.on('message', (data, isBinary) => {
     if (isBinary) return;
@@ -153,17 +254,51 @@ sockets.on('connection', (socket, request) => {
       windowStart = now;
       received = 0;
     }
-    if (++received > MESSAGES_PER_SECOND) return;
-    const message = parseClientMessage(data.toString());
+    if (++received > (hosting ? HOST_MESSAGES_PER_SECOND : MESSAGES_PER_SECOND)) return;
+    const raw = data.toString();
+    const signalMessage = parseSignalMessage(raw);
+    if (signalMessage) {
+      switch (signalMessage.type) {
+        case 'keepalive':
+          return;
+        case 'host': {
+          if (member || hosting || guestOf) return;
+          if (rooms.size + hosted.size >= MAX_ROOMS) {
+            reject(socket, 'server-full', 'O servidor está cheio. Tente de novo em instantes.');
+            return;
+          }
+          hosting = { code: createRoomCode(), host: socket, guests: new Map(), joined: 0 };
+          hosted.set(hosting.code, hosting);
+          const invite = inviteInfo();
+          signal(socket, { type: 'hosting', room: hosting.code, publicUrl: invite.url, inviteHint: invite.hint });
+          return;
+        }
+        case 'relay':
+        case 'signal': {
+          if (hosting && signalMessage.to) {
+            const guest = hosting.guests.get(signalMessage.to);
+            if (guest) signal(guest, signalMessage.type === 'relay' ? { type: 'relay', data: signalMessage.data } : { type: 'signal', data: signalMessage.data });
+          } else if (guestOf && !signalMessage.to) {
+            const from = guestOf.peer;
+            signal(
+              guestOf.room.host,
+              signalMessage.type === 'relay' ? { type: 'relay', from, data: signalMessage.data } : { type: 'signal', from, data: signalMessage.data },
+            );
+          }
+          return;
+        }
+      }
+    }
+    const message = parseClientMessage(raw);
     if (!message) return;
 
     if (message.type !== 'join') {
       if (room && member) room.handle(member, message);
       return;
     }
-    if (member) return;
+    if (member || hosting || guestOf) return;
     if (message.room === null) {
-      if (rooms.size >= MAX_ROOMS) {
+      if (rooms.size + hosted.size >= MAX_ROOMS) {
         reject(socket, 'server-full', 'O servidor está cheio. Tente de novo em instantes.');
         return;
       }
@@ -175,6 +310,11 @@ sockets.on('connection', (socket, request) => {
         reject(socket, 'too-many-attempts', 'Muitas tentativas de entrar em salas. Espere um minuto e tente de novo.');
         return;
       }
+      const target = hosted.get(message.room);
+      if (target) {
+        joinHosted(target);
+        return;
+      }
       room = rooms.get(message.room) ?? null;
       if (!room) {
         joinFailures.set(key, [...failures, now]);
@@ -182,7 +322,7 @@ sockets.on('connection', (socket, request) => {
         return;
       }
     }
-    member = room.join(socket);
+    member = room.join(wsPeer(socket));
     if (!member) {
       room = null;
       reject(socket, 'room-full', 'A sala está cheia (máximo de 4 jogadores).');
@@ -191,6 +331,19 @@ sockets.on('connection', (socket, request) => {
 
   socket.on('close', () => {
     if (room && member) room.leave(member);
+    if (hosting) {
+      hosted.delete(hosting.code);
+      for (const guest of hosting.guests.values()) {
+        signal(guest, { type: 'hostLeft' });
+        guest.close(1000, 'host-left');
+      }
+      hosting = null;
+    }
+    if (guestOf) {
+      guestOf.room.guests.delete(guestOf.peer);
+      signal(guestOf.room.host, { type: 'peerLeft', peer: guestOf.peer });
+      guestOf = null;
+    }
   });
   socket.on('error', () => socket.terminate());
 });

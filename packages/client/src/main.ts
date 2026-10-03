@@ -218,7 +218,7 @@ function scoreline(match: MatchState): HTMLElement {
 }
 
 function inviteLink(): string {
-  const base = (online?.publicUrl ?? location.origin).replace(/\/$/, '');
+  const base = (online?.publicUrl ?? `${location.origin}${location.pathname}`).replace(/\/$/, '');
   return `${base}/?sala=${online?.room ?? ''}`;
 }
 

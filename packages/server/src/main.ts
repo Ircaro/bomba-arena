@@ -191,7 +191,7 @@ function readPresence(request: http.IncomingMessage, response: http.ServerRespon
       if (leaving) presence.delete(id);
       else if (presence.has(id) || presence.size < PRESENCE_MAX) presence.set(id, Date.now());
     }
-    response.writeHead(204, { 'Cache-Control': 'no-store' });
+    response.writeHead(204, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
     response.end();
   });
 }
